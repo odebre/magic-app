@@ -1,0 +1,90 @@
+from flask import Flask, request, jsonify
+import pytesseract
+from pdf2image import convert_from_path
+from PIL import Image
+import os
+
+# Initialize the Flask app
+app = Flask(__name__)
+
+# Directory for temporary uploads and processing
+UPLOAD_FOLDER = './uploads'
+PROCESSED_FOLDER = './processed'
+os.makedirs(UPLOAD_FOLDER, exist_ok=True)
+os.makedirs(PROCESSED_FOLDER, exist_ok=True)
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# Temporary in-memory storage for word positions
+word_positions = {}
+
+# Function to process PDF and extract text with positions
+def process_pdf(file_path):
+    """
+    Process a PDF file, convert each page to an image, 
+    and extract text using OCR (Tesseract).
+    """
+    extracted_data = {}
+    pages = convert_from_path(file_path)
+    
+    for page_number, page in enumerate(pages, start=1):
+        # Save page image temporarily
+        temp_image_path = os.path.join(PROCESSED_FOLDER, f"page_{page_number}.png")
+        page.save(temp_image_path, 'PNG')
+        
+        # Use Tesseract to perform OCR on the image
+        custom_config = r'--psm 6'  # Assume block of text
+        text = pytesseract.image_to_data(Image.open(temp_image_path), config=custom_config, output_type=pytesseract.Output.DICT)
+        
+        # Extract words with positions
+        for i, word in enumerate(text['text']):
+            if word.strip():
+                word_position = {
+                    'page': page_number,
+                    'line': text['line_num'][i],
+                    'column': text['block_num'][i]
+                }
+                extracted_data[word.lower()] = word_position
+                
+        # Cleanup temporary image
+        os.remove(temp_image_path)
+    
+    return extracted_data
+
+# Route for uploading the file
+@app.route('/upload', methods=['POST'])
+def upload_file():
+    if 'file' not in request.files:
+        return jsonify({"error": "No file part"}), 400
+
+    file = request.files['file']
+    if file.filename == '':
+        return jsonify({"error": "No selected file"}), 400
+
+    if file:
+        file_path = os.path.join(app.config['UPLOAD_FOLDER'], file.filename)
+        file.save(file_path)
+
+        # Process the file
+        global word_positions
+        word_positions = process_pdf(file_path)
+
+        # Cleanup uploaded file
+        os.remove(file_path)
+
+        return jsonify({"message": "File processed successfully"}), 200
+
+# Route for querying a word
+@app.route('/query', methods=['GET'])
+def query_word():
+    word = request.args.get('word', '').lower()
+    if not word:
+        return jsonify({"error": "No word provided"}), 400
+
+    if word in word_positions:
+        return jsonify({word: word_positions[word]}), 200
+    else:
+        return jsonify({"error": "Word not found"}), 404
+
+# Run the Flask app
+if __name__ == '__main__':
+    app.run(debug=True, host='172.20.101.20', port=5000)
